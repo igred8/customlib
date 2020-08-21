@@ -10,6 +10,7 @@
 import sys
 import os
 import time
+import bisect
 
 import scipy.constants as pc
 import numpy as np
@@ -401,11 +402,168 @@ def ics_lum_headon(eng_ele, eng_las, num_ele, num_las, sigma_ele_x, sigma_ele_y,
     return lum
 
 
+#
+##
+### === Transfer matrix beamlines
+##
+#
+
+class ElementABCD(object):
+    """
+    Optical element represented by an ABCD matrix. 
+
+    drift:
+        properties = {'position':0,
+                              'length':0}
+    lens:
+        properties = {'position':0,
+                              'focal_len':0}
+    """
+    def __init__(self, name, eletype='drift', eleprops={'position':0,'length':0}):
+        
+        self.name = name
+        self.element_type = eletype
+        self.properties = eleprops
+        
+        if self.element_type == 'drift':
+            self.abcd_mat = np.array([[1, self.properties['length']],
+                                      [0, 1]])
+        
+        elif self.element_type == 'lens':
+            self.abcd_mat = np.array([[1, 0],
+                                      [-1 / self.properties['focal_len'], 1]])
+        
+        else:
+            print('WARNING: Element type not supported. Created drift with zero length.')
+
+        
+
+class BeamLine(object):
+    """
+    Optical beamline class. 
+    Store elements as matricies (ABCD or electron transfer matricies). 
+
+    """
+
+    def __init__(self):
+        
+        self.element_list = []
+        self.element_names = []
+        self.element_position = []
+
+    def add_element(self, element):
+        """ Adds an element class to the beamline.
+        
+        element is a class ElementABCD() or similar.
+        """
+        try:
+            # insert the element based on its positionin along the beamline
+            posi = element.properties['position']
+            bisect.insort(self.element_position, posi)
+            addindex = self.element_position.index(posi)
+            self.element_list.insert(addindex, element)
+            self.element_names.insert(addindex, element.name)
+            
+        except AttributeError:
+            print('ERROR! element does not possess the required attributes. Need class with .name and .properties()')
+            return 1
+
+        return 0
+
+    def del_element(self, elementname):
+        """ Deletes the specified element from the beamline
+        """
+        try:
+            delindex = self.element_names.index(elementname)
+            del self.element_list[delindex]
+            del self.element_names[delindex]
+            del self.element_position[delindex]
+
+        except ValueError:
+            print('WARNING: Beamline does not contain element with that name.')
+            return 1
+
+        return 0
+
+    def make_mat(self, senter, sexit):
+        """ Based on the given location in the beamline, find the total transfer matrix.
+        Assumes that the elements are sorted by the sort_element() routine.
+        """
+        # init transport matrix
+        transportmatrix = np.eye(2)
+        # print(transportmatrix)
+
+        # position temporary
+        si = senter
+        
+        # include elements up to sexit point
+        s0index = bisect.bisect(self.element_position, senter) 
+        s1index = bisect.bisect(self.element_position, sexit)
+        # print(s0index)
+        # print(s1index)
+        for i,ele in enumerate(self.element_list[s0index:s1index],start=s0index):
+            # print(ele.name)
+            # drift to element from previous position
+            driftlen = self.element_position[i] - si
+            # print(driftlen)
+            # print(transportmatrix)
+            matdrift = ElementABCD('tempdrift', eletype='drift', eleprops={'position':0, 'length':driftlen}).abcd_mat
+            # print(matdrift)
+            transportmatrix = np.matmul(matdrift, transportmatrix)
+            # print(transportmatrix)
+            # element
+            transportmatrix = np.matmul(ele.abcd_mat, transportmatrix)
+            # print(transportmatrix)
+            try:
+                # sold = si
+                si = self.element_position[i]
+            except IndexError:
+                
+                continue
+
+        
+
+        # drift to final position from last element before final position
+        driftlen = sexit - si
+        
+        matdrift = ElementABCD('tempdrift', eletype='drift', eleprops={'position':0, 'length':driftlen}).abcd_mat
+
+        transportmatrix = np.matmul(matdrift, transportmatrix)
+        # print(transportmatrix)
+
+
+        return transportmatrix 
+
+    def ray_trace(self, invec, inpos, outpos):
+        """ Given a set of input vectors with initial transverse postion and angle, calculate their transport through the beamline at teh specified outpos.
+
+        invec - ndarray.shape = (2,n)
+        inpos - float position at which invec is specified
+        outpos = ndarray.shape = (m,)
+
+        """
+        # inital transport to first point
+        transmat = self.make_mat(inpos, outpos[0])
+        outvec = np.matmul(transmat, invec)
+        outvec = np.stack((invec, outvec))
+
+        for i,ss in enumerate(outpos[1:], start=1):
+
+            transmat = self.make_mat(outpos[i-1], ss)
+            outvectemp = np.matmul(transmat, outvec[-1])
+            outvec = np.concatenate((outvec, [outvectemp]), axis=0)
+
+        outpos = np.insert(outpos, 0, inpos)
+
+        return outpos, outvec
+            
+
+    
 
 
 #
 ##
-###  === Particle Swarm Optimization
+### === Particle Swarm Optimization
 ##
 #
 
