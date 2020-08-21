@@ -125,50 +125,128 @@ def stepfunc(xvec, center, width):
 
     return yvec
 
-def smooth(xvec, yvec, width, mode='gauss',edgemode='cut'):
-    """
-    xvec
-    yvec
-    
-    width - float. if mode == 'gauss' width=std, if 'step' [center-width/2, center+width/2]
-    mode - {'gauss','step', 'median'}
-    edgemode = {'cut','pad'}
-    to be used with gaussian or stepfunc
-    """
-    center = xvec.min() + (xvec.max() - xvec.min() ) / 2
-    xstep = xvec[1]-xvec[0]
-    xlen = xvec.shape[0]
+class signal(object):
 
-    if mode in ['gauss', 'step']:
-        if mode == 'gauss':
-            nsig = 5
-            xvectemp = np.arange(center - nsig * width, center + nsig * width + xstep, xstep)
-            wvec = gaussian(xvectemp, center, width)
-        elif mode == 'step':
-            xvectemp = np.arange(center - width/2, center + width/2 + xstep, xstep)
-            wvec = stepfunc(xvectemp, center, width)
+    def smooth(xvec, yvec, width, mode='gauss', edgemode='cut'):
+        """
+        xvec
+        yvec
         
-        cnorm = 1 / (np.sum(wvec))
-        xvec = cnorm * np.convolve(xvec, wvec, mode='valid')
-        yvec = cnorm * np.convolve(yvec, wvec, mode='valid')
-    
-    elif mode == 'median':
-        yvec = sps.medfilt(yvec, kernel_size=width)
-    else:
-        print("ERROR: _mode_ must be 'gauss', 'step', or 'median' ")
-        return 1
-    
-    ndiff = xlen - xvec.shape[0]
-    if ndiff < 0:
-        print('WARNING: `width` is larger than `xvec` span.')
-    else:
-        if edgemode == 'pad':
-            xvec = np.pad(xvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
-            yvec = np.pad(yvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
-        
+        width - float. if mode == 'gauss' width=std, if 'step' [center-width/2, center+width/2]
+        mode - {'gauss','step', 'median'}
+        edgemode = {'cut','pad'}
+        to be used with gaussian or stepfunc
+        """
+        center = xvec.min() + (xvec.max() - xvec.min() ) / 2
+        xstep = xvec[1]-xvec[0]
+        xlen = xvec.shape[0]
 
-   
-    return xvec, yvec
+        if mode in ['gauss', 'step']:
+            wvec = 0
+            if mode == 'gauss':
+                nsig = 5
+                xvectemp = np.arange(center - nsig * width, center + nsig * width + xstep, xstep)
+                wvec = gaussian(xvectemp, center, width)
+            elif mode == 'step':
+                xvectemp = np.arange(center - width/2, center + width/2 + xstep, xstep)
+                wvec = stepfunc(xvectemp, center, width)
+            
+            cnorm = 1 / (np.sum(wvec))
+            xvec = cnorm * np.convolve(xvec, wvec, mode='valid')
+            yvec = cnorm * np.convolve(yvec, wvec, mode='valid')
+        
+        elif mode == 'median':
+            yvec = sps.medfilt(yvec, kernel_size=width)
+        else:
+            print("ERROR: _mode_ must be 'gauss', 'step', or 'median' ")
+            return 1
+        
+        ndiff = xlen - xvec.shape[0]
+        if ndiff < 0:
+            print('WARNING: `width` is larger than `xvec` span.')
+        else:
+            if edgemode == 'pad':
+                xvec = np.pad(xvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
+                yvec = np.pad(yvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
+            
+
+    
+        return xvec, yvec
+
+    def fft_scale(timevec, sigvec, convertfactor, mode='weight', power=2, freqlims='auto'):
+        """ Given a time-series signal, rescale its time axis, based on its main FFT frequency and the given conversion factor.
+        This action effectively calibrates the time axis to a known length scale, given by convertfactor.
+        
+        timevec - ndarray(n,)
+        sigvec - ndarray(n,)
+        convertfactor - float
+
+        mode = {'weight', 'max'}, takes a weighted sum of the frequencies to find the main freq content. 'max' takes the freq with maximum amplitude.
+        power = 1, the power for the weighting function. not used for 'max' mode.
+
+        freqlims='auto, if 'auto', then use (0,inf) interval. else use (fmin, fmax) interval. 
+
+        returns:
+        timescale - the scaling factor to calibrate time axis
+        freq_main - main frequency component of the signal
+        sigfft_freq - frequency vector from FFT
+        sigfft - FFT of signal
+
+        """
+
+        # number of samples
+        nsamples = sigvec.shape[0]
+
+        # FFT of signal with appropriate normalization
+        sigfft = (1 / nsamples) * np.fft.fft(sigvec)
+
+        # time step
+        timestep = (timevec[1:] - timevec[:-1]).mean()
+
+        # frequency vector
+        sigfft_freq = np.fft.fftfreq(nsamples, d=timestep)
+        if freqlims == 'auto':
+            # take only positive frequencies and exclude zero
+            fmin = 0.0
+            indlogic = (sigfft_freq > fmin)
+        else:
+            fmin = freqlims[0]
+            fmax = freqlims[1]
+            indlogic = (sigfft_freq > fmin) & (sigfft_freq < fmax)
+        
+        if mode == 'weight':
+            # find the main frequency, based on the largest FFT amplitudes averaged with weigths
+            # weight of freq is a power of their FFT amplitude
+
+            # inside freqlims 
+            sigfft_bound = sigfft[indlogic]
+            sigfft_freq_bound = sigfft_freq[indlogic]
+
+            # number of frequencies to average over
+            nfreq = np.sum(indlogic)
+            
+            # normalization constant of frequencies
+            normconst =  1 / np.sum(np.abs(sigfft_bound)**power)
+            # main frequency
+            freq_main = normconst * np.sum(sigfft_freq_bound * np.abs(sigfft_bound)**power)
+        
+        elif mode == 'max':
+            # inside freqlims 
+            sigfft_bound = sigfft[indlogic]
+            sigfft_freq_bound = sigfft_freq[indlogic]
+
+            #  freq with largest amplitude
+            freq_main = sigfft_freq_bound[np.abs(sigfft_bound).argmax()]
+
+        else:
+            print('ERROR! Mode not recongnized. Please use {"weight", "max"}.')
+            return 1
+
+
+        # scale wavelength to period of undulator
+        timescale = convertfactor * freq_main
+
+        return timescale, freq_main, sigfft_freq, sigfft
 
 #
 # === Integrate
