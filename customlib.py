@@ -14,7 +14,6 @@ import bisect
 
 import scipy.constants as pc
 import numpy as np
-import pandas as pd
 
 import scipy.signal as sps
 
@@ -173,10 +172,17 @@ class signal(object):
     
         return xvec, yvec
 
-    def fft_scale(timevec, sigvec, convertfactor, mode='weight', power=2, freqlims='auto'):
-        """ Given a time-series signal, rescale its time axis, based on its main FFT frequency and the given conversion factor.
+    def fft_scale_phase(timevec, sigvec, convertfactor, 
+    mode='weight', power=2, freqlims='auto',
+    phase=0.0):
+        """ Given a time-series signal 
+        1. rescale its time axis, based on its main FFT frequency and the given conversion factor 
+        and 2. phase the signal to the  
         This action effectively calibrates the time axis to a known length scale, given by convertfactor.
-        
+        "Phasing" the signal is based on maximizing the correlation of the signal with a wavelet of its main frequency for a specified phase. 
+        This is a form of peak alignment. Returns the time-shift needed to do this.
+
+        inputs:
         timevec - ndarray(n,)
         sigvec - ndarray(n,)
         convertfactor - float
@@ -186,9 +192,13 @@ class signal(object):
 
         freqlims='auto, if 'auto', then use (0,inf) interval. else use (fmin, fmax) interval. 
 
+        phase - float. radians. the phase of the main freq oscillation. 0 is cosine-like
+
         returns:
-        timescale - the scaling factor to calibrate time axis
+        timescale - scaling factor to calibrate time axis
+        timeshift - shift in time for time-align 
         freq_main - main frequency component of the signal
+        
         sigfft_freq - frequency vector from FFT
         sigfft - FFT of signal
 
@@ -239,14 +249,49 @@ class signal(object):
             freq_main = sigfft_freq_bound[np.abs(sigfft_bound).argmax()]
 
         else:
-            print('ERROR! Mode not recongnized. Please use {"weight", "max"}.')
+            print('ERROR! Mode not recognized. Please use {"weight", "max"}.')
             return 1
 
 
         # scale wavelength to period of undulator
         timescale = convertfactor * freq_main
 
-        return timescale, freq_main, sigfft_freq, sigfft
+        # time-align
+        
+        # create wavelet with same sampling as signal
+        omega = 2*pc.pi*freq_main
+        wavelet = np.cos(omega*timevec + phase)
+        # correlate (order of input vectors matters for timeshift sign.)
+        tcorr = np.correlate(sigvec, wavelet, mode='full')
+        # convert to a shift in time
+        timeshift = (nsamples - (tcorr.argmax() + 1)) * timestep
+        
+        # mod to 2pi and shift to inside [-pi,pi]
+        timeshift = (1/omega) * (np.mod(omega*timeshift - pc.pi, 2*pc.pi) - pc.pi)
+
+
+        return timescale, timeshift, freq_main, sigfft_freq, sigfft
+
+    def align(sig1, sig2):
+        """ 
+        ---
+        EXPERIMENTAL
+        ---
+        
+        Aligns the signals to maximize their correlation. 
+        Uses np.correlate().
+        sig1 - ndarray
+        sig2 - ndarray
+
+        returns: indexshift - this is the index shift for the time vector for the sig1. 
+        """
+        # correlation
+        tcorr = np.correlate(sig1, sig2, mode='full')
+        nsamples = sig1.shape[0]
+        # shift in index for sig1
+        indexshift = (nsamples - (tcorr.argmax() + 1))
+
+        return indexshift, tcorr
 
 #
 # === Integrate
@@ -265,6 +310,23 @@ def numint(xvec, yvec):
     numeric_integral = np.sum( delxvec * yvec )
     return numeric_integral
 
+#
+# === magnets
+
+def fringe(z, z1, z2, rad, a1):
+    """
+    Approximation to the longitudinal profile of a multipole from a permanent magnet assembly.
+    
+    see Wan et al. 2018 for definition and Enge functions paper (Enge 1964)
+    """
+    zz1 = (z - z1) / (2 * rad / pc.pi)
+    zz2 = (z - z2) / (2 * rad / pc.pi)
+    fout = ( (1 / ( 2 *  np.tanh((z2 - z1) / (4 * rad / pc.pi)) ) ) 
+            * (np.tanh(zz1 + a1 * zz1**2 )  
+               - np.tanh(zz2 - a1 * zz2**2) )
+           )
+    
+    return fout
 
 #
 # === physics specific functions
@@ -308,7 +370,7 @@ def mom_rel(totengMeV, restmassMeV):
     prel = np.sqrt( totengMeV**2 - restmassMeV**2)
     return prel
 
-def mom_rigid(momMeV, charge):
+def mom_rigid(momMeV, charge=1):
     """ Returns the momentum rigidity for a given momentum in MeV and charge in units of elementary charge units, e. 
     
     B * rho = (1e6 / c) * (1 / charge) * pc 
@@ -491,23 +553,24 @@ class ElementABCD(object):
     Optical element represented by an ABCD matrix. 
 
     drift:
-        properties = {'position':0,
-                              'length':0}
+        properties = {'eletype':'drift',
+                      'position':0,
+                      'length':0}
     lens:
-        properties = {'position':0,
-                              'focal_len':0}
+        properties = {'eletype':'lens',
+                      'position':0,
+                      'focal_len':0}
     """
-    def __init__(self, name, eletype='drift', eleprops={'position':0,'length':0}):
+    def __init__(self, name, eleprops={'eletype':'drift','position':0,'length':0}):
         
         self.name = name
-        self.element_type = eletype
         self.properties = eleprops
         
-        if self.element_type == 'drift':
+        if self.properties['eletype'] == 'drift':
             self.abcd_mat = np.array([[1, self.properties['length']],
                                       [0, 1]])
         
-        elif self.element_type == 'lens':
+        elif self.properties['eletype'] == 'lens':
             self.abcd_mat = np.array([[1, 0],
                                       [-1 / self.properties['focal_len'], 1]])
         
@@ -585,7 +648,7 @@ class BeamLine(object):
             driftlen = self.element_position[i] - si
             # print(driftlen)
             # print(transportmatrix)
-            matdrift = ElementABCD('tempdrift', eletype='drift', eleprops={'position':0, 'length':driftlen}).abcd_mat
+            matdrift = ElementABCD('tempdrift', eleprops={'eletype':'drift','position':0, 'length':driftlen}).abcd_mat
             # print(matdrift)
             transportmatrix = np.matmul(matdrift, transportmatrix)
             # print(transportmatrix)
@@ -604,7 +667,7 @@ class BeamLine(object):
         # drift to final position from last element before final position
         driftlen = sexit - si
         
-        matdrift = ElementABCD('tempdrift', eletype='drift', eleprops={'position':0, 'length':driftlen}).abcd_mat
+        matdrift = ElementABCD('tempdrift', eleprops={'eletype':'drift', 'position':0, 'length':driftlen}).abcd_mat
 
         transportmatrix = np.matmul(matdrift, transportmatrix)
         # print(transportmatrix)
