@@ -11,6 +11,7 @@ import sys
 import os
 import time
 import bisect
+import json
 
 import scipy.constants as pc
 import numpy as np
@@ -19,6 +20,24 @@ import scipy.signal as sps
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as mcm
+
+
+# make a custom JSON encoder
+class NdArrEncoder(json.JSONEncoder):
+    """
+    Class to encode nd.array into JSON. Inhehrits from json.JSONEncoder.
+    Useful for storing PSO output to file.
+    """
+    def default(self, obj):
+        """
+        default() method of JSONEncoder that is re-implemented to handle np.ndarray
+        """
+
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        # this return statement allows JSONEncoder to handle errors and stuff
+        return json.JSONEncoder.default(self, obj)
+
 
 #
 # ===== global defs =====
@@ -584,6 +603,10 @@ class BeamLine(object):
     Optical beamline class. 
     Store elements as matricies (ABCD or electron transfer matricies). 
 
+
+    TODO:
+    Make sort_element routine !!!!!!!!!!!!!!!!!!
+    
     """
 
     def __init__(self):
@@ -676,7 +699,7 @@ class BeamLine(object):
         return transportmatrix 
 
     def ray_trace(self, invec, inpos, outpos):
-        """ Given a set of input vectors with initial transverse postion and angle, calculate their transport through the beamline at teh specified outpos.
+        """ Given a set of input vectors with initial transverse postion and angle, calculate their transport through the beamline at the specified outpos.
 
         invec - ndarray.shape = (2,n)
         inpos - float position at which invec is specified
@@ -744,8 +767,15 @@ class PSO(object):
         self.phi1 = 2.05
         self.phi2 = 2.05
 
+        self.searchspace = np.array([])
+        self.domain = np.array([])
+        self.target = np.array([])
+        self.nparticles = 0
         self.maxiter = 0
         self.precision = 0
+        
+
+        self.output = {} # dictionary contains PSO output arrays from run_pso()
 
     def cost(self, current, target):
         """ Calculates the total square difference between the current parameter values and the target values.
@@ -795,10 +825,24 @@ class PSO(object):
         maxiter - maximum number of iterations to the optimization routine
         precision - how close to the target to attemp to get
         domain - absolute boundaries on the trial solutions/particles
+
+        outputs:
+        xarr - particle positions for all iterations
+        varr - particle velocities for all iterations
+        parr - best particle position for all iterations
+        cparr - cost of best particle position for all iterations
+        garr - best global position for all iterations
+        cgarr - cost of best global positions for all iterations
+
+
         """
         # update attributes
+        
+        self.searchspace = searchspace
+        self.domain = domain
         self.maxiter = maxiter
         self.precision = precision
+        self.nparticles = nparticles
 
         # search space dimensionality
         if searchspace.shape[1] != 2:
@@ -820,9 +864,6 @@ class PSO(object):
         gbest = pbest[im]
         cgbest = cpbest[im]
 
-        if False:
-            return xpart, vpart, pbest, cpbest, gbest, cgbest
-
         # intermediate arrays
         # multiply by 1.0 to make copies not bind references
         xarr = 1.0 * xpart[:,:,None]
@@ -835,6 +876,7 @@ class PSO(object):
         iternum = 0
 
         t1 = time.time()
+        tprint = time.time()
         while (iternum <= maxiter) and ( cgbest > precision):
         # while (iternum <= maxiter):
 
@@ -868,12 +910,85 @@ class PSO(object):
             garr = np.concatenate((garr, gbest[:,None]), axis=1)
             cgarr = np.append(cgarr, cgbest)
 
+            if verbose:
+                if iternum%10 == 0:
+                    
+                    print( ( 'finished iterations: {:d}'
+                            +'\nelapsed time: {:5.2f} seconds'
+                            +'\n---'
+                            ).format(*[iternum, time.time() - tprint ])
+                        )
+                    tprint = time.time()
+
             iternum += 1
 
         t2 = time.time()
         if verbose:
             print('optimization took {:5.2f} seconds'.format(*[t2-t1]))
 
-        return xarr, varr, parr, cparr, garr, cgarr
+        arrkeys = ['xarr', 'varr', 'parr', 'cparr', 'garr', 'cgarr']
+        arrlist = [xarr, varr, parr, cparr, garr, cgarr]
 
+        # update the output dictionary
+        self.format_out_dict(arrkeys, arrlist)
+
+        return 0
+
+    def format_out_dict(self, outarrkeys=None, arrlist=None, notes='none'):
+        """
+        Helper method to format the output dictionary for JSONEncoder.
+        outarrkeys - list of strings corresponding the array names of PSO output
+        outarrlist - list of output np.ndarrays created in the 
+        notes = 'none' optionally add a string of notes e.g. 'varied rin13, rin2, and zlen. optimized for a target integrated gradient.'
+        """
+        # update the output
+        infodict = { 'searchspace' : self.searchspace
+                    ,'domain' : self.domain
+                    ,'target' : self.target
+                    ,'nparticles' : self.nparticles
+                    ,'maxiter' : self.maxiter
+                    ,'precision' : self.precision
+                    ,'notes' : notes
+                    }
+        self.output['info'] = infodict
+        
+        if (outarrkeys != None) and (arrlist != None):
+            # add arrays to output dict
+            for k,a in zip(outarrkeys, arrlist): self.output[k] = a
+
+        return 0
+    
+    def save_pso_output(self, outfilepath):
+        """
+        Saves the output np.ndarrays to a JSON file in the specified output path.
+        Requires NdArrEncoder class.time
+        """
+        
+        with open(outfilepath, 'w') as outfile:
+            json.dump(self.output, outfile, cls=NdArrEncoder)
+        
+        return 0
+
+    def load_pso_output(self, outfilepath):
+        """
+        Load a json file created from previous PSO run.
+
+        Expected arrays:
+        xarr - particle positions for all iterations
+        varr - particle velocities for all iterations
+        parr - best particle position for all iterations
+        cparr - cost of best particle position for all iterations
+        garr - best global position for all iterations
+        cgarr - cost of best global positions for all iterations
+        """
+
+        with open(outfilepath, 'r') as readfile:
+            pso_output = json.load(readfile)
+
+        # convert back to np.ndarray from nested lists
+        for k in pso_output.keys():
+            if isinstance(pso_output[k], list):
+                pso_output[k] = np.array(pso_output[k])
+
+        return pso_output
 
