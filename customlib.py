@@ -18,7 +18,6 @@ import numpy as np
 
 import scipy.signal as sps
 
-import matplotlib.pyplot as plt
 import matplotlib.cm as mcm
 
 
@@ -567,7 +566,7 @@ def ics_lum_headon(eng_ele, eng_las, num_ele, num_las, sigma_ele_x, sigma_ele_y,
 ##
 #
 
-class ElementABCD(object):
+class BLElement(object):
     """
     Optical element represented by an ABCD matrix. 
 
@@ -579,6 +578,15 @@ class ElementABCD(object):
         properties = {'eletype':'lens',
                       'position':0,
                       'focal_len':0}
+    quad:
+        properties = {'eletype':'quad',
+                      'position':0.0,
+                      'maglen':0.0,
+                      'gradient':0.0,
+                      'totengMeV':0.0,
+                      'restmassMeV':0.0,
+                      'charge':1,
+                      'focus':{'focus','defocus'}}
     """
     def __init__(self, name, eleprops={'eletype':'drift','position':0,'length':0}):
         
@@ -586,13 +594,23 @@ class ElementABCD(object):
         self.properties = eleprops
         
         if self.properties['eletype'] == 'drift':
-            self.abcd_mat = np.array([[1, self.properties['length']],
+            self.mat2x2 = np.array([[1, self.properties['length']],
                                       [0, 1]])
         
         elif self.properties['eletype'] == 'lens':
-            self.abcd_mat = np.array([[1, 0],
+            self.mat2x2 = np.array([[1, 0],
                                       [-1 / self.properties['focal_len'], 1]])
-        
+        elif self.properties['eletype'] == 'quad':
+            matargs = [  self.properties['maglen']
+                        ,self.properties['gradient']
+                        ,self.properties['totengMeV']
+                        ,self.properties['restmassMeV']
+                        ]
+            matkwargs ={  'charge':self.properties['charge']
+                         ,'focus':self.properties['focus'] 
+                         }
+            self.mat2x2 = mat_quad(*matargs,**matkwargs)
+
         else:
             print('WARNING: Element type not supported. Created drift with zero length.')
 
@@ -603,10 +621,7 @@ class BeamLine(object):
     Optical beamline class. 
     Store elements as matricies (ABCD or electron transfer matricies). 
 
-
-    TODO:
-    Make sort_element routine !!!!!!!!!!!!!!!!!!
-    
+   
     """
 
     def __init__(self):
@@ -618,7 +633,8 @@ class BeamLine(object):
     def add_element(self, element):
         """ Adds an element class to the beamline.
         
-        element is a class ElementABCD() or similar.
+        element is a class BLElement() or similar.
+        The element is inserted into the list based on its position, using `bisect`. 
         """
         try:
             # insert the element based on its positionin along the beamline
@@ -649,9 +665,9 @@ class BeamLine(object):
 
         return 0
 
-    def make_mat(self, senter, sexit):
+    def make_mat(self, senter, sexit, ytransport=False):
         """ Based on the given location in the beamline, find the total transfer matrix.
-        Assumes that the elements are sorted by the sort_element() routine.
+        Assumes that the elements are sorted by their position. This is the case when the .add_element() method was used to add the element to the beamline.
         """
         # init transport matrix
         transportmatrix = np.eye(2)
@@ -671,12 +687,16 @@ class BeamLine(object):
             driftlen = self.element_position[i] - si
             # print(driftlen)
             # print(transportmatrix)
-            matdrift = ElementABCD('tempdrift', eleprops={'eletype':'drift','position':0, 'length':driftlen}).abcd_mat
+            matdrift = BLElement('tempdrift', eleprops={'eletype':'drift','position':0, 'length':driftlen}).mat2x2
             # print(matdrift)
             transportmatrix = np.matmul(matdrift, transportmatrix)
             # print(transportmatrix)
             # element
-            transportmatrix = np.matmul(ele.abcd_mat, transportmatrix)
+            if ytransport and (ele.properties['eletype'] == 'quad'):
+                elemat2x2 = ele.mat2x2 * np.array([[1,1],[-1,1]])
+            else:
+                elemat2x2 = ele.mat2x2
+            transportmatrix = np.matmul(elemat2x2, transportmatrix)
             # print(transportmatrix)
             try:
                 # sold = si
@@ -690,7 +710,7 @@ class BeamLine(object):
         # drift to final position from last element before final position
         driftlen = sexit - si
         
-        matdrift = ElementABCD('tempdrift', eleprops={'eletype':'drift', 'position':0, 'length':driftlen}).abcd_mat
+        matdrift = BLElement('tempdrift', eleprops={'eletype':'drift', 'position':0, 'length':driftlen}).mat2x2
 
         transportmatrix = np.matmul(matdrift, transportmatrix)
         # print(transportmatrix)
@@ -698,7 +718,7 @@ class BeamLine(object):
 
         return transportmatrix 
 
-    def ray_trace(self, invec, inpos, outpos):
+    def ray_trace(self, invec, inpos, outpos, ytransport=False):
         """ Given a set of input vectors with initial transverse postion and angle, calculate their transport through the beamline at the specified outpos.
 
         invec - ndarray.shape = (2,n)
@@ -713,7 +733,7 @@ class BeamLine(object):
 
         for i,ss in enumerate(outpos[1:], start=1):
 
-            transmat = self.make_mat(outpos[i-1], ss)
+            transmat = self.make_mat(outpos[i-1], ss, ytransport=ytransport)
             outvectemp = np.matmul(transmat, outvec[-1])
             outvec = np.concatenate((outvec, [outvectemp]), axis=0)
 
