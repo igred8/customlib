@@ -18,7 +18,7 @@ import numpy as np
 
 import scipy.signal as sps
 
-import matplotlib.cm as mcm
+from matplotlib.cm import ScalarMappable
 
 
 # make a custom JSON encoder
@@ -86,22 +86,28 @@ def rgb_color(value, cmapname='viridis'):
     value - between 0 and 1
     cmapname='viridis' name of the colormap
     """ 
-    cmap = mcm.ScalarMappable(cmap=cmapname)
+    cmap = ScalarMappable(cmap=cmapname)
     return list(cmap.to_rgba(value, bytes=False, norm=False)[:-1])
 
-def gaussian(xvec, mean, std):
+def gaussian(xvec, mean, std, norm='max'):
     """ Returns the Gaussian of the xvec normalized so that the peak is unity.
     xvec - ndarray of floats 
     mean - float. the center of the Gaussian
     std - float. the standard deviation of the Gaussian
+    norm - {'max', 'area'} whether to normalize so that the maximum is unity or the area under the curve is unity
 
-    yvec = Exp( - (x - mean)^2 / 2std^2 )
+    yvec = normconstant * Exp( - (x - mean)^2 / 2std^2 )
 
     """
 
     yvec = np.exp( - (xvec - mean)**2 / (2 * std**2) )
 
-    return yvec
+    if norm == 'area':
+        normconstant = 1 / np.trapz(yvec, xvec)
+    else:
+        normconstant = 1
+
+    return normconstant * yvec
 
 def gaussianDx(x, mu, sig):
     """ First derivative of a Gaussian. Normalized so that its maximum is 1.
@@ -130,29 +136,38 @@ def gaussianDx2(x, mu, sig):
     y = y/np.abs(y).max()
     return y
 
-def stepfunc(xvec, center, width):
+def stepfunc(xvec, center, width, norm='max'):
     """
     Returns a step function with center and total width.
     xvec - ndarray of floats 
     center - float
     width - float. total width of box or step
+    norm - {'max', 'area'} whether to normalize so that the maximum is unity or the area under the curve is unity
     """
 
     yvec = [ int((xx >= center - width/2) and (xx <= center + width/2)) for xx in xvec]
+    if norm == 'area':
+        normconstant = 1 / np.trapz(yvec, xvec)
+    else:
+        normconstant = 1
 
-    return yvec
+    return normconstant * yvec
 
 class signal(object):
 
-    def smooth(xvec, yvec, width, mode='gauss', edgemode='cut'):
+    def smooth(xvec, yvec, width, mode='gauss', edgemode='valid'):
         """
         xvec
         yvec
         
         width - float. if mode == 'gauss' width=std, if 'step' [center-width/2, center+width/2]
         mode - {'gauss','step', 'median'}
-        edgemode = {'cut','pad'}
+        edgemode = {'valid','pad'}
         to be used with gaussian or stepfunc
+
+        When 'gauss' or 'step' filtering modes are used, both xvec and yvec are convolved with a gaussian or step function. The output x and y vecs are of shorter length because the 'valid' values begin at the point when the span of the convolution function (gauss/step) is inside the boundaries of the original xvec. 
+        If the edgemode='valid' is used, then the output xvec and yvec are shorter than the input vectors, which may lead to problems when trying to compare initial to filtered signals. 
+        The edgemode='pad' features aims to rectify this by padding the filtered yvec with the edge value on both sides, while keeping the original xvec values there. This method does introduce a discontinuity of the the derivative of the filtered signal.  
         """
         center = xvec.min() + (xvec.max() - xvec.min() ) / 2
         xstep = xvec[1]-xvec[0]
@@ -169,25 +184,26 @@ class signal(object):
                 wvec = stepfunc(xvectemp, center, width)
             
             cnorm = 1 / (np.sum(wvec))
-            xvec = cnorm * np.convolve(xvec, wvec, mode='valid')
+            # use mode='valid', otherwise edge/boundary values are not intuitive
             yvec = cnorm * np.convolve(yvec, wvec, mode='valid')
-        
+            
+            ndiff = xlen - yvec.shape[0]
+            # if ndiff < 0:
+            #     print('WARNING: `width` is larger than `xvec` span.')  
+            if edgemode == 'pad':
+                
+                yvec = np.pad(yvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
+
+            elif edgemode == 'valid':
+                xvec = cnorm * np.convolve(xvec, wvec, mode='valid') # done to match length of x and y vecs
+
         elif mode == 'median':
             yvec = sps.medfilt(yvec, kernel_size=width)
         else:
             print("ERROR: _mode_ must be 'gauss', 'step', or 'median' ")
             return 1
-        
-        ndiff = xlen - xvec.shape[0]
-        if ndiff < 0:
-            print('WARNING: `width` is larger than `xvec` span.')
-        else:
-            if edgemode == 'pad':
-                xvec = np.pad(xvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
-                yvec = np.pad(yvec, [ndiff // 2, ndiff - ndiff // 2], mode='edge')
-            
 
-    
+
         return xvec, yvec
 
     def fft_scale_phase(timevec, sigvec, convertfactor, 
@@ -322,10 +338,9 @@ def numint(xvec, yvec):
     
     """
     # differential element vector
-    delxvec = np.abs(xvec[1:] - xvec[:-1])
-    delxvec = np.append(delxvec, delxvec[-1]) # make same length
-    
-    numeric_integral = np.sum( delxvec * yvec )
+    dxvec = np.diff( xvec, n=1, prepend=(xvec[1]-xvec[0]) )
+    numeric_integral = np.nansum( dxvec * yvec )
+    print('WARNING! Please consider using the function `np.trapz()` for improved performance.\n`cl.numint()` will be removed in the future.')
     return numeric_integral
 
 #
@@ -458,106 +473,6 @@ def make_M_mat(mat):
                      ])
     return mat3
 
-#
-# === ICS analytic formulas
-
-def eng_photon(wavelen):
-    """ Returns the energy of the photon with the given wavelength.
-
-    wavelen - float. meter.
-
-    returns the energy in MeV
-    """
-    hbark = 1e-6 * pc.hbar * pc.c * 2 * pc.pi / wavelen / pc.e
-
-    return hbark
-
-def ics_gammaCM(engele, englas, angin):
-    """ The relativistic gamma factor of the center of momentum frame.
-    engele - float. MeV energy of incoming electron
-    englas - float MeV energy of incoming laser photon
-    angin - float. radians angle between the incoming electron and photon in the lab frame
-
-
-    """
-    x =  (4 * engele * englas) / mc2**2
-
-    gcm = ( engele + englas ) / ( mc2 * np.sqrt(1 + (x/2) * (1 - np.cos(angin)) ) )
-
-    return gcm
-
-def ics_betaCM(engele, englas, angin):
-    """ The beta factor of the center of momentum frame.
-    engele - float. MeV energy of incoming electron
-    englas - float MeV energy of incoming laser photon
-    angin - float. radians angle between the incoming electron and photon in the lab frame
-
-    """
-    bcm = np.sqrt( 1 - ( 2*engele*englas*(1 - np.cos(angin)) ) / ( engele + englas )**2 )
-
-    return bcm
-
-def ics_eng_ph(engele, englas, angin, angout):
-
-    """ Calculate the energy of the scattered photon in the outgoing angle.
-    This is the full formula when eqs 6 and 11 of Curatolo et al. (2017) are combined.
-    
-    engele - float. MeV energy of incoming electron
-    englas - float MeV energy of incoming laser photon
-    angin - float. radians angle between the incoming electron and photon in the lab frame
-    
-    returns engph in MeV
-    """
-    gcm = ics_gammaCM(engele, englas, angin)
-    bcm = ics_betaCM(engele, englas, angin)
-
-    angoutdep = ( 1 + bcm*np.cos(angout) ) / ( np.cos(angout)**2 + gcm**2 * np.sin(angout)**2 )
-
-    engph = englas * gcm**2 * (1 - np.cos(angin)) * angoutdep
-
-    return engph
-
-def ics_sig(eng_ele, eng_las):
-    """ Calculates the Compton scattering cross-section as a proportion of the Thomson cross section.
-    sigma_T = 8*pi*re^2/3
-
-    eng_ele - float. MeV. total energy of the incoming electron
-    eng_las - float. MeV. total energy of the incoming laser photons
-    
-    x - unitless. defined as: x = 4*E_e*E_L / (m_e*c^2)^2. It is a measure of the recoil effect due to the high electron energy or photon energy when compared to the rest mass of the electron.
-
-    returns sigma/sigma_T
-
-    !!! NB: if x is too small, numerical erros due to division by small numbers and subtraction of small numbers begin to take over. usually around x<1e-4. In small x limit, sigma/sigma_T is well approximated by simply (1-x).
-    """
-    x = 4 * eng_ele * eng_las / mc2**2
-    
-    sigbysigT = ((3/4)
-              *(1/x)
-              *(1/2 + 8/x - 1/(2*(1+x)**2) + (1 - 4/x - 8/x**2)*np.log(1 + x) )
-              )
-    return sigbysigT
-
-def ics_lum_headon(eng_ele, eng_las, num_ele, num_las, sigma_ele_x, sigma_ele_y, sigma_las, reprate=1.0):
-    """ Calculate the luminosity for a HEAD-ON collision between Gaussian beams. 
-    eng_ele - float. MeV. total energy of the incoming electron
-    eng_las - float. MeV. total energy of the incoming laser photons
-    num_ele - float. number of electrons
-    num_las - float. number of laser photons
-    sigma_ele_x, sigma_ele_y - float. meter. x and y RMS of electron beam
-    sigma_las - float. meter. sigma_las = waist/2
-    reprate - float. number of beam-beam collisions per second.
-
-    luminosity =  N_e * N_l * reprate * cross_section / overlap
-    """
-
-    overlap = 2*pc.pi*np.sqrt(sigma_ele_x**2 + sigma_las**2)*np.sqrt(sigma_ele_y**2 + sigma_las**2)
-
-    sigThomson = pc.physical_constants['Thomson cross section'][0]
-    sigTotal = sigThomson * ics_sig(eng_ele, eng_las)
-    lum = num_ele * num_las * reprate  * sigTotal/ overlap
-
-    return lum
 
 
 #
@@ -742,6 +657,106 @@ class BeamLine(object):
         return outpos, outvec
             
 
+#
+# === ICS analytic formulas
+
+def eng_photon(wavelen):
+    """ Returns the energy of the photon with the given wavelength.
+
+    wavelen - float. meter.
+
+    returns the energy in MeV
+    """
+    hbark = 1e-6 * pc.hbar * pc.c * 2 * pc.pi / wavelen / pc.e
+
+    return hbark
+
+def ics_gammaCM(engele, englas, angin):
+    """ The relativistic gamma factor of the center of momentum frame.
+    engele - float. MeV energy of incoming electron
+    englas - float MeV energy of incoming laser photon
+    angin - float. radians angle between the incoming electron and photon in the lab frame
+
+
+    """
+    x =  (4 * engele * englas) / mc2**2
+
+    gcm = ( engele + englas ) / ( mc2 * np.sqrt(1 + (x/2) * (1 - np.cos(angin)) ) )
+
+    return gcm
+
+def ics_betaCM(engele, englas, angin):
+    """ The beta factor of the center of momentum frame.
+    engele - float. MeV energy of incoming electron
+    englas - float MeV energy of incoming laser photon
+    angin - float. radians angle between the incoming electron and photon in the lab frame
+
+    """
+    bcm = np.sqrt( 1 - ( 2*engele*englas*(1 - np.cos(angin)) ) / ( engele + englas )**2 )
+
+    return bcm
+
+def ics_eng_ph(engele, englas, angin, angout):
+
+    """ Calculate the energy of the scattered photon in the outgoing angle.
+    This is the full formula when eqs 6 and 11 of Curatolo et al. (2017) are combined.
+    
+    engele - float. MeV energy of incoming electron
+    englas - float MeV energy of incoming laser photon
+    angin - float. radians angle between the incoming electron and photon in the lab frame
+    
+    returns engph in MeV
+    """
+    gcm = ics_gammaCM(engele, englas, angin)
+    bcm = ics_betaCM(engele, englas, angin)
+
+    angoutdep = ( 1 + bcm*np.cos(angout) ) / ( np.cos(angout)**2 + gcm**2 * np.sin(angout)**2 )
+
+    engph = englas * gcm**2 * (1 - np.cos(angin)) * angoutdep
+
+    return engph
+
+def ics_sig(eng_ele, eng_las):
+    """ Calculates the Compton scattering cross-section as a proportion of the Thomson cross section.
+    sigma_T = 8*pi*re^2/3
+
+    eng_ele - float. MeV. total energy of the incoming electron
+    eng_las - float. MeV. total energy of the incoming laser photons
+    
+    x - unitless. defined as: x = 4*E_e*E_L / (m_e*c^2)^2. It is a measure of the recoil effect due to the high electron energy or photon energy when compared to the rest mass of the electron.
+
+    returns sigma/sigma_T
+
+    !!! NB: if x is too small, numerical erros due to division by small numbers and subtraction of small numbers begin to take over. usually around x<1e-4. In small x limit, sigma/sigma_T is well approximated by simply (1-x).
+    """
+    x = 4 * eng_ele * eng_las / mc2**2
+    
+    sigbysigT = ((3/4)
+              *(1/x)
+              *(1/2 + 8/x - 1/(2*(1+x)**2) + (1 - 4/x - 8/x**2)*np.log(1 + x) )
+              )
+    return sigbysigT
+
+def ics_lum_headon(eng_ele, eng_las, num_ele, num_las, sigma_ele_x, sigma_ele_y, sigma_las, reprate=1.0):
+    """ Calculate the luminosity for a HEAD-ON collision between Gaussian beams. 
+    eng_ele - float. MeV. total energy of the incoming electron
+    eng_las - float. MeV. total energy of the incoming laser photons
+    num_ele - float. number of electrons
+    num_las - float. number of laser photons
+    sigma_ele_x, sigma_ele_y - float. meter. x and y RMS of electron beam
+    sigma_las - float. meter. sigma_las = waist/2
+    reprate - float. number of beam-beam collisions per second.
+
+    luminosity =  N_e * N_l * reprate * cross_section / overlap
+    """
+
+    overlap = 2*pc.pi*np.sqrt(sigma_ele_x**2 + sigma_las**2)*np.sqrt(sigma_ele_y**2 + sigma_las**2)
+
+    sigThomson = pc.physical_constants['Thomson cross section'][0]
+    sigTotal = sigThomson * ics_sig(eng_ele, eng_las)
+    lum = num_ele * num_las * reprate  * sigTotal/ overlap
+
+    return lum
     
 
 
