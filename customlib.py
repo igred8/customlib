@@ -19,6 +19,7 @@ import numpy as np
 import scipy.signal as sps
 
 from matplotlib.cm import ScalarMappable
+import matplotlib.pyplot as plt
 
 
 # make a custom JSON encoder
@@ -49,6 +50,7 @@ origin = np.array([0,0,0])
 
 # physical constants
 mc2 = 1e-6 * (pc.m_e*pc.c**2)/pc.elementary_charge # MeV. electron mass
+mpc2 = 1e-6 * (pc.m_p*pc.c**2)/pc.elementary_charge # MeV. proton mass
 
 #
 # ===== helper functions =====
@@ -89,6 +91,82 @@ def rgb_color(value, cmapname='viridis'):
     cmap = ScalarMappable(cmap=cmapname)
     return list(cmap.to_rgba(value, bytes=False, norm=False)[:-1])
 
+def contourplot(xx, yy, zz, 
+                 zlims='auto', 
+                 arat=1, contours=True, 
+                 cbarlabel='<color_bar_label>', colormap='viridis', 
+                 xticks='auto', yticks='auto',
+                 imkwargs=None, ckwargs=None):
+    """ make a contour plot on top of an imshow figure for the given arrays
+    xx, yy, zz are arrays from np.meshgrid() see numpy docs for ref
+    s"""
+    
+    # compute limits for the plots
+    xylims = [xx.min(),xx.max(), yy.min(),yy.max()]
+    
+    if (type(xticks) is np.ndarray) and (type(yticks) is np.ndarray):
+        try:
+            xt = np.unique(xx)
+            xstep = np.abs(xt[1] - xt[0])
+            yt = np.unique(yy)
+            ystep = np.abs(yt[1] - yt[0])
+            xylims = [xticks.min() - xstep/2, xticks.max() + xstep/2, yticks.min() - ystep/2, yticks.max() + ystep/2]
+        except AttributeError:
+            pass
+
+    if zlims == 'auto':
+        zmin = zz.min()
+        zmax = zz.max()
+    else:
+        zmin = zlims[0]
+        zmax = zlims[1]
+    
+    fig, ax = plt.subplots(figsize=(12,12))
+    
+    if imkwargs == None:
+        imkwargs = dict(cmap=colormap, alpha=0.99, extent=xylims, vmin=zmin,vmax=zmax, interpolation='none', origin='lower')
+
+    im = ax.imshow(zz, **imkwargs)
+    ax.set_aspect(arat)
+
+    CS = 0
+    if contours:
+        if ckwargs == None:
+            ckwargs = dict(colors='white', extent=xylims, vmin=zmin,vmax=zmax,levels=19, linewidths=0.5, origin='lower')
+
+        CS = ax.contour(xx,yy,zz,**ckwargs)
+        
+        # ax.clabel(CS, fontsize=14, inline=True, fmt='%1.0f')
+    
+    
+    fs = dict(fontsize=18)
+    if cbarlabel != 'none':
+        cbar = fig.colorbar(im, shrink=0.7)
+        
+        # cbar.ax.set_ylabel('Tesla', **fs)
+        cbar.ax.set_ylabel(cbarlabel, **fs)
+        # cbar.add_lines(CS)
+        cbar.ax.tick_params(labelcolor='k', labelsize=14, width=1)
+
+#     plt.axis([-10,10,-10,10])
+
+    if type(xticks) is np.ndarray:
+        print('HELLO-------')
+        ax.set_xticks(xticks)
+    elif xticks == 'auto':
+        xticks = np.unique(np.round(xx, decimals=3))
+        # print(xticks)
+        plt.xticks(xticks)
+    
+    if type(yticks) is np.ndarray:
+        ax.set_yticks(yticks)
+    elif yticks == 'auto':
+        yticks = np.unique(np.round(xx, decimals=3))
+        # print(yticks)
+        plt.yticks(yticks)
+        
+    return fig, ax, CS
+
 def gaussian(xvec, mean, std, norm='max'):
     """ Returns the Gaussian of the xvec normalized so that the peak is unity.
     xvec - ndarray of floats 
@@ -103,7 +181,7 @@ def gaussian(xvec, mean, std, norm='max'):
     yvec = np.exp( - (xvec - mean)**2 / (2 * std**2) )
 
     if norm == 'area':
-        normconstant = 1 / np.trapz(yvec, xvec)
+        normconstant = 1 / (std * np.sqrt(2 * pc.pi))
     else:
         normconstant = 1
 
@@ -364,67 +442,121 @@ def fringe(z, z1, z2, rad, a1):
 #
 # === physics specific functions
 #
+class laser():
 
-def bwlimit(freq0, timeFWHM, mode='gauss'):
-    """ Calculate FWHM BW of a laser pulse, given a central frequency and the pulse length FWHM.
+    def bwlimit(freq0, timeFWHM, mode='gauss'):
+        """ Calculate FWHM BW of a laser pulse, given a central frequency and the pulse length FWHM.
 
-    return freqFWHM, wlFWHM
-    """
+        return freqFWHM, wlFWHM
+        """
 
-    bwfactor = {'unit':1.0, 'gauss':0.441, 'sech':0.315}
-    freqFWHM = bwfactor[mode] / timeFWHM
+        bwfactor = {'unit':1.0, 'gauss':0.441, 'sech':0.315}
+        freqFWHM = bwfactor[mode] / timeFWHM
 
-    # convert to wavelength
-    wlFWHM = (pc.c / freq0**2) * freqFWHM
+        # convert to wavelength
+        wlFWHM = (pc.c / freq0**2) * freqFWHM
 
-    return freqFWHM, wlFWHM
+        return freqFWHM, wlFWHM
 
-#
+    def zrayleigh(w0, wavelength):
+        """
+            Rayleigh range. For a Gaussian beam, it is the distance from the focus at which the area of the laser spot-size is doubled -> beam radius is increased by sqrt(2). 
+        """
+        zr = pc.pi * w0**2 / wavelength
+        
+        return zr
+
+    def waist(w0, z, wavelength, M2):
+        
+        """
+        Waist of the laser beam with minimum size w0. Distance z away from minimum.
+        W(z)=W0*(1+M2(z/zR)^2)
+        """
+
+        wz = w0 * np.sqrt( 1 + M2 * (z / laser.zrayleigh(w0, wavelength) )**2 )
+
+        return wz
+
+    def fluence(waist, energy):
+        """
+        The fluence per pulse.
+        fluence units are Joules / cm^2 
+
+        waist - [m] waist of laser pulse 
+        energy - [J] energy of laser pulse
+        """
+        waist = 100 * waist # convert to cm
+        flu = energy / ( pc.pi * waist**2)
+        return flu
+
+    def efld(waist, power):
+        """
+        Electric field corresponding to a given power and spot-size. 
+         
+        """
+        E0 = np.sqrt( np.sqrt(2)*power / (pc.epsilon_0*pc.c*pc.pi*waist**2) )
+        return E0
+
+    def a0potential(E0, wavelength):
+        """
+        Normalized vector potential of the laser pulse.
+        """
+        const = pc.elementary_charge / (2*pc.pi*pc.m_e*pc.c**2)
+        a0 = const * E0 * wavelength
+        return a0
+
+
+#   
 # === beam dynamics
 
-def gamma_beta_rel(totengMeV, restmassMeV):
-    """ returns the relativistic factors gamma and beta for a given particle energy (gmc2) and rest mass (mc2)
-
-    gamma = totengMeV / restmassMeV
-    beta = sqrt( 1 - 1/g^2)
+class ebeam():
     """
-    gamma = totengMeV / restmassMeV
-    beta = np.sqrt( 1 - 1 / gamma**2)
-
-    return gamma, beta
-
-def mom_rel(totengMeV, restmassMeV):
-    """ returns the relativistic momentum (in units of MeV/c) of the particle with the specified total energy (gmc2) and rest mass (mc2) 
-
-    pc = sqrt( E^2 - mc2^2 )
-
-    NB: the output is in units of MeV/c. 
-    """
-    prel = np.sqrt( totengMeV**2 - restmassMeV**2)
-    return prel
-
-def mom_rigid(momMeV, charge=1):
-    """ Returns the momentum rigidity for a given momentum in MeV and charge in units of elementary charge units, e. 
-    
-    B * rho = (1e6 / c) * (1 / charge) * pc 
-    """
-    br = (1e6 / pc.c) * (momMeV / charge)
-
-    return br
-
-def emit_convert(emit_old, frac_old, frac_new):
-    """ Convert to emittance that encompases the given fraction.
-
-    emit_old - float. geometric or normalized emittance that encompases `frac_old` of the beam
-    frac_old - float. [0,1] the fraction of the beam encompassed by the emit_old 
-    frac_new - float. [0,1] new fraction encompased by emittance
-
-    This is just a factor that multiplies the input emittance. 
+    class to keep functions organized.
     """
 
-    emit_new = emit_old * (np.log(1 - frac_new) / np.log(1 - frac_old))
+    def gamma_beta_rel(totengMeV, restmassMeV):
+        """ returns the relativistic factors gamma and beta for a given particle energy (gmc2) and rest mass (mc2)
 
-    return emit_new
+        gamma = totengMeV / restmassMeV
+        beta = sqrt( 1 - 1/g^2)
+        """
+        gamma = totengMeV / restmassMeV
+        beta = np.sqrt( 1 - 1 / gamma**2)
+
+        return gamma, beta
+
+    def mom_rel(totengMeV, restmassMeV):
+        """ returns the relativistic momentum (in units of MeV/c) of the particle with the specified total energy (gmc2) and rest mass (mc2) 
+
+        pc = sqrt( E^2 - mc2^2 )
+
+        NB: the output is in units of MeV/c. 
+        """
+        prel = np.sqrt( totengMeV**2 - restmassMeV**2)
+        return prel
+
+    def mom_rigid(momMeV, charge=1):
+        """ Returns the momentum rigidity for a given momentum in MeV and charge in units of elementary charge units, e. 
+        
+        B * rho = (1e6 / c) * (1 / charge) * pc 
+        """
+        br = (1e6 / pc.c) * (momMeV / charge)
+
+        return br
+
+    def emit_convert(emit_old, frac_old, frac_new):
+        """ Convert to emittance that encompases the given fraction.
+
+        emit_old - float. geometric or normalized emittance that encompases `frac_old` of the beam
+        frac_old - float. [0,1] the fraction of the beam encompassed by the emit_old 
+        frac_new - float. [0,1] new fraction encompased by emittance
+
+        This is just a factor that multiplies the input emittance. 
+        """
+
+        emit_new = emit_old * (np.log(1 - frac_new) / np.log(1 - frac_old))
+
+        return emit_new
 
 ## Transfer matrix formalism
 
@@ -643,9 +775,9 @@ class BeamLine(object):
         """
         # inital transport to first point
         transmat = self.make_mat(inpos, outpos[0])
-        outvec = np.matmul(transmat, invec)
-        outvec = np.stack((invec, outvec))
-
+        outvec = np.matmul(transmat, invec) # include start position in output
+        outvec = np.stack((invec, outvec)) # joins arrays along new axis
+        
         for i,ss in enumerate(outpos[1:], start=1):
 
             transmat = self.make_mat(outpos[i-1], ss, ytransport=ytransport)
@@ -654,7 +786,16 @@ class BeamLine(object):
 
         outpos = np.insert(outpos, 0, inpos)
 
-        return outpos, outvec
+        # calculate centroid position
+        outvec_posmean = np.array( [ outvec[i,0,:].mean() for i in range(outvec.shape[0]) ] )
+        outvec_angmean = np.array( [ outvec[i,1,:].mean() for i in range(outvec.shape[0]) ] )
+        outvecMEAN = np.c_[outvec_posmean, outvec_angmean]
+        # calculate RMS size and angle
+        outvec_posstd = np.array( [ outvec[i,0,:].std() for i in range(outvec.shape[0]) ] )
+        outvec_angstd = np.array( [ outvec[i,1,:].std() for i in range(outvec.shape[0]) ] )
+        outvecRMS = np.c_[outvec_posstd, outvec_angstd]
+
+        return outpos, outvec, outvecMEAN, outvecRMS
             
 
 #
@@ -849,7 +990,7 @@ class PSO(object):
 
         return vout
 
-    def run_pso(self, function, searchspace, target, nparticles, maxiter, precision, domain, verbose=True):
+    def run_pso(self, function, searchspace, target, nparticles, maxiter, precision, domain, rngseed=42, verbose=True):
 
         """ Performs a PSO for the given function in the searchspace, looking for the target, which is in the output space.
         
@@ -860,7 +1001,7 @@ class PSO(object):
         maxiter - maximum number of iterations to the optimization routine
         precision - how close to the target to attemp to get
         domain - absolute boundaries on the trial solutions/particles
-
+        rngseed=42 int. the seed for the numpy RNG. 
         outputs:
         xarr - particle positions for all iterations
         varr - particle velocities for all iterations
@@ -885,7 +1026,8 @@ class PSO(object):
         ssdim = searchspace.shape[0]
         
         # init particle positions and velocities
-        xpart = np.random.random((nparticles, ssdim))
+        rng = np.random.default_rng(rngseed)
+        xpart = rng.random((nparticles, ssdim))
         for ii in range(ssdim):
             xpart[:,ii] = (searchspace[ii,1] - searchspace[ii,0]) * xpart[:,ii] + searchspace[ii,0] # scale the uniform radnom dist
         
@@ -946,7 +1088,8 @@ class PSO(object):
             cgarr = np.append(cgarr, cgbest)
 
             if verbose:
-                if iternum%10 == 0:
+                maxiter10 = int(maxiter / 10)
+                if iternum%maxiter10 == 0:
                     
                     print( ( 'finished iterations: {:d}'
                             +'\nelapsed time: {:5.2f} seconds'
