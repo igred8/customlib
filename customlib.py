@@ -470,10 +470,10 @@ class laser():
         
         """
         Waist of the laser beam with minimum size w0. Distance z away from minimum.
-        W(z)=W0*(1+M2(z/zR)^2)
+        W(z) = W0 * ( 1 + M2^2  ( z / zR )^2 )
         """
 
-        wz = w0 * np.sqrt( 1 + M2 * (z / laser.zrayleigh(w0, wavelength) )**2 )
+        wz = w0 * np.sqrt( 1 + M2**2 * (z / laser.zrayleigh(w0, wavelength) )**2 )
 
         return wz
 
@@ -505,6 +505,13 @@ class laser():
         a0 = const * E0 * wavelength
         return a0
 
+    def photon_energy(wavelength):
+        """
+        Returns the energy of a photon with the specified wavelength.
+        output is in units of Joules.
+        divide by elementary charge ~ 1.6e-19 to convert to eV
+        """
+        return pc.h * pc.c / wavelength
 
 #   
 # === beam dynamics
@@ -557,6 +564,27 @@ class ebeam():
         emit_new = emit_old * (np.log(1 - frac_new) / np.log(1 - frac_old))
 
         return emit_new
+
+    def beta_drift(s, s0, beta0):
+        """
+        Beta function in a drift.
+        s0 - location of minimum of beta function
+        beta0 - beta function minimum
+        """
+        beta = beta0 * ( 1 + ( (s - s0) / beta0 )**2 )
+        return beta
+
+    def phase_drift(s, s0, beta0):
+        """
+        Phase advance inside a drift section.
+        s0 - location of minimum of beta function
+        beta0 - beta function minimum
+        
+        """
+        y = s/beta0
+        x = 1 - s0 * (s - s0) / beta0**2
+        phi = np.arctan2( y, x )
+        return phi
 
 ## Transfer matrix formalism
 
